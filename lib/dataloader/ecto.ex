@@ -424,6 +424,13 @@ if Code.ensure_loaded?(Ecto) do
         {{:assoc, schema, self(), assoc_field, queryable, opts}, id, record}
       end
 
+      defp get_keys({{cardinality, {relation_name, queryable}}, opts}, value)
+           when is_atom(queryable) do
+        validate_queryable(queryable)
+        {_, col, value} = normalize_value(queryable, value)
+        {{:queryable, self(), {relation_name, queryable}, cardinality, col, opts}, value, value}
+      end
+
       defp get_keys({{cardinality, queryable}, opts}, value) when is_atom(queryable) do
         validate_queryable(queryable)
         {_, col, value} = normalize_value(queryable, value)
@@ -523,13 +530,51 @@ if Code.ensure_loaded?(Ecto) do
       end
 
       defp run_batch(
-             {{:queryable, pid, queryable, cardinality, col, opts} = key, entries},
+             {{:queryable, pid, {relation_name, queryable}, cardinality, col, opts}, entries},
+             source
+           ) do
+        query = source.query.({relation_name, queryable}, opts)
+
+        handle_run_batch(
+          query,
+          {{:queryable, pid, queryable, cardinality, col, opts}, entries},
+          source
+        )
+      end
+
+      defp run_batch(
+             {{:queryable, _pid, queryable, _cardinality, _col, opts}, _entries} = query_entry,
+             source
+           ) do
+        query = source.query.(queryable, opts)
+        handle_run_batch(query, query_entry, source)
+      end
+
+      defp run_batch({{:assoc, schema, pid, field, queryable, opts} = key, records}, source) do
+        {ids, records} = Enum.unzip(records)
+
+        query = source.query.(queryable, opts)
+        query = Ecto.Queryable.to_query(query)
+
+        repo_opts = Keyword.put(source.repo_opts, :caller, pid)
+
+        empty = schema |> struct |> Map.fetch!(field)
+
+        results =
+          records
+          |> Enum.map(&Map.put(&1, field, empty))
+          |> source.repo.preload([{field, query}], repo_opts)
+          |> Enum.map(&Map.get(&1, field))
+
+        {key, Map.new(Enum.zip(ids, results))}
+      end
+
+      defp handle_run_batch(
+             query,
+             {{:queryable, pid, queryable, cardinality, col, _opts} = key, entries},
              source
            ) do
         inputs = Enum.map(entries, &elem(&1, 0))
-
-        query = source.query.(queryable, opts)
-
         repo_opts = Keyword.put(source.repo_opts, :caller, pid)
 
         cardinality_mapper = cardinality_mapper(cardinality, queryable)
@@ -555,25 +600,6 @@ if Code.ensure_loaded?(Ecto) do
           |> Map.new()
 
         {key, results}
-      end
-
-      defp run_batch({{:assoc, schema, pid, field, queryable, opts} = key, records}, source) do
-        {ids, records} = Enum.unzip(records)
-
-        query = source.query.(queryable, opts)
-        query = Ecto.Queryable.to_query(query)
-
-        repo_opts = Keyword.put(source.repo_opts, :caller, pid)
-
-        empty = schema |> struct |> Map.fetch!(field)
-
-        results =
-          records
-          |> Enum.map(&Map.put(&1, field, empty))
-          |> source.repo.preload([{field, query}], repo_opts)
-          |> Enum.map(&Map.get(&1, field))
-
-        {key, Map.new(Enum.zip(ids, results))}
       end
 
       defp cardinality_mapper(:many, _) do
